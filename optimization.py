@@ -20,8 +20,8 @@ problem.solve()
 
 
 def portfolio_performance(weights, mean_returns, cov_matrix):
-    returns = np.sum(mean_returns*weights)*12
-    std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(12)
+    returns = np.sum(mean_returns*weights)*256
+    std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(256)
 
 
 
