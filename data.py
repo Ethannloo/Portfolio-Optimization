@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 # Download or load historical price data
 csv_file = '/Users/ethanloo/Desktop/Coding Projects/Portfolio Optimization/data.csv'
-tickers = ['AAPL', 'MSFT', 'GOOG', 'AMZN']
+tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'GOOG', 'TSLA']
 end_date = datetime.today()
 adj_close_df = pd.DataFrame()
 
