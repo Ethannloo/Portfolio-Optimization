@@ -37,3 +37,5 @@ def main():
                            for lag in range(1, lag_nums + 1)], axis=0)
     X_next = last_feat.values.reshape(1, -1)
     mu_next = model.predict(X_next)[0]
+if __name__ == "__main__":
+    main()
