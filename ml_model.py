@@ -1,117 +1,179 @@
-import numpy as np
+"""
+Train and predict next-month log returns using a multi-output XGBRFRegressor.
+"""
+import argparse
+import logging
+import os
 import pandas as pd
-from xgboost import XGBRFRegressor  # Use XGBRFRegressor for random forests
+import numpy as np
+from xgboost import XGBRFRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
+import joblib
 
-def main():
-    CSV_FILE = 'data.csv'
-    lag_nums = 3
-    test_ratio = 0.2
-    params = {
-        'n_estimators': 100,  # Number of trees
-        'max_depth': 4,       # Maximum depth of each tree
-        'random_state': 42    # For reproducibility
-    }  # Parameters for XGBRFRegressor
 
-    # Read and sort data
-    prices = pd.read_csv(CSV_FILE, index_col=0, parse_dates=True).sort_index()
-    returns = np.log(prices / prices.shift(1)).dropna()  # Calculate log returns
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
 
-    # Calculate lagged log returns
-    lagged_features = []
+
+def load_data(csv_file: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
+    return df.sort_index()
+
+
+def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute compounded log returns.
+    """
+    returns = np.log(prices / prices.shift(1)).dropna()
+    return returns
+
+
+def prepare_features(
+    returns: pd.DataFrame,
+    lag_nums: int,
+    rolling_windows: list[int]
+) -> pd.DataFrame:
+    """
+    Generate lagged and rolling window features.
+    """
+    lagged = []
     for lag in range(1, lag_nums + 1):
-        lag_returns = returns.shift(lag).add_prefix(f'lag{lag}_').dropna()
-        lagged_features.append(lag_returns)
-
-    # Calculate rolling statistics
-    rolling_windows = [3, 6]
-    rolling_features = []
+        lagged.append(returns.shift(lag).add_prefix(f"lag{lag}_"))
+    rolling = []
     for window in rolling_windows:
-        rolling_mean = returns.rolling(window=window).mean().add_prefix(f'roll_mean_{window}m_')
-        rolling_features.append(rolling_mean)
-        rolling_std = returns.rolling(window=window).std().add_prefix(f'roll_std_{window}m_')
-        rolling_features.append(rolling_std)
-        rolling_min = returns.rolling(window=window).min().add_prefix(f'roll_min_{window}m_')
-        rolling_features.append(rolling_min)
-        rolling_max = returns.rolling(window=window).max().add_prefix(f'roll_max_{window}m_')  # Fixed prefix
-        rolling_features.append(rolling_max)
+        rolling.append(returns.rolling(window=window).mean().add_prefix(f"roll_mean_{window}m_"))
+        rolling.append(returns.rolling(window=window).std().add_prefix(f"roll_std_{window}m_"))
+        rolling.append(returns.rolling(window=window).min().add_prefix(f"roll_min_{window}m_"))
+        rolling.append(returns.rolling(window=window).max().add_prefix(f"roll_max_{window}m_"))
+    X = pd.concat(lagged + rolling, axis=1).dropna()
+    return X
 
-    # Concatenate lagged and rolling features
-    all_features = lagged_features + rolling_features
-    X = pd.concat(all_features, axis=1).dropna()
+
+def train_evaluate_model(
+    X: pd.DataFrame,
+    Y: pd.DataFrame,
+    test_ratio: float,
+    rf_params: dict,
+    model_path: str = None
+) -> MultiOutputRegressor:
+    """
+    Split into train-test, fit model, evaluate performance, and persist if requested.
+    """
+    n_samples = len(X)
+    split_idx = int(n_samples * (1 - test_ratio))
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    Y_train, Y_test = Y.iloc[:split_idx], Y.iloc[split_idx:]
+
+    # Convert to numpy for XGBoost
+    X_train_arr, X_test_arr = X_train.values, X_test.values
+    Y_train_arr, Y_test_arr = Y_train.values, Y_test.values
+
+    logging.info(f"Training on {len(X_train_arr)} samples, testing on {len(X_test_arr)} samples.")
+
+    base_model = XGBRFRegressor(**rf_params)
+    model = MultiOutputRegressor(base_model)
+    model.fit(X_train_arr, Y_train_arr)
+
+    # Predictions and evaluation
+    Y_pred_arr = model.predict(X_test_arr)
+    Y_pred = pd.DataFrame(Y_pred_arr, index=Y_test.index, columns=Y_test.columns)
+    mae_scores = {col: mean_absolute_error(Y_test[col], Y_pred[col]) for col in Y.columns}
+    r2_scores = {col: r2_score(Y_test[col], Y_pred[col]) for col in Y.columns}
+
+    for col in Y.columns:
+        logging.info(f"{col} - MAE: {mae_scores[col]:.6f}, R2: {r2_scores[col]:.6f}")
+    logging.info(f"Average MAE: {np.mean(list(mae_scores.values())):.6f}, Average R2: {np.mean(list(r2_scores.values())):.6f}")
+
+    # Persist model with error handling
+    if model_path:
+        try:
+            joblib.dump(model, model_path)
+            logging.info(f"Model saved to {model_path}")
+        except Exception as e:
+            logging.warning(f"Could not save model to {model_path}: {e}")
+
+    return model
+
+
+def predict_next_mu(
+    returns: pd.DataFrame,
+    periods_per_year: int = 12,
+    lag_nums: int = 3,
+    rolling_windows: list[int] = [3, 6],
+    test_ratio: float = 0.2,
+    rf_params: dict = None,
+    model_path: str = "ml_model.pkl"
+) -> pd.Series:
+    """
+    Predict next-month returns (annualized) using a Random Forest model.
+
+    - Evaluates on holdout
+    - Retrains on full dataset for final prediction
+    """
+    if rf_params is None:
+        rf_params = {"n_estimators": 100, "max_depth": 4, "random_state": 42}
+
+    setup_logging()
+    X = prepare_features(returns, lag_nums, rolling_windows)
     Y = returns.loc[X.index]
 
-    # Train-test split
-    n_rows = X.shape[0]
-    train_size = int(n_rows * (1 - test_ratio))  # Number of rows for training
-    train_idx = X.index[:train_size]  # Indices for training (first 80%)
-    test_idx = X.index[train_size:]   # Indices for testing (last 20%)
+    # Load or train & evaluate
+    if os.path.exists(model_path):
+        try:
+            model = joblib.load(model_path)
+            logging.info(f"Loaded existing model from {model_path}")
+        except Exception as e:
+            logging.warning(f"Could not load model from {model_path}: {e}")
+            model = train_evaluate_model(X, Y, test_ratio, rf_params, model_path)
+    else:
+        model = train_evaluate_model(X, Y, test_ratio, rf_params, model_path)
 
-    X_train = X.loc[train_idx]
-    X_test = X.loc[test_idx]
-    Y_train = Y.loc[train_idx]
-    Y_test = Y.loc[test_idx]
+    # Retrain on full dataset
+    X_arr, Y_arr = X.values, Y.values
+    final_base = XGBRFRegressor(**rf_params)
+    final_model = MultiOutputRegressor(final_base)
+    final_model.fit(X_arr, Y_arr)
 
-    # Verify shapes
-    print(f"Total rows: {n_rows}")
-    print(f"Training rows: {X_train.shape[0]}, Testing rows: {X_test.shape[0]}")
-    print(f"X_train shape: {X_train.shape}, Y_train shape: {Y_train.shape}")
-    print(f"X_test shape: {X_test.shape}, Y_test shape: {Y_test.shape}")
+    # Predict next
+    latest_X = X.tail(1).values
+    pred = final_model.predict(latest_X)[0]
+    mu_monthly = pd.Series(pred, index=Y.columns)
+    return mu_monthly * periods_per_year
 
-    # Define and train model
-    base_model = XGBRFRegressor(**params)
-    model = MultiOutputRegressor(base_model)
-    model.fit(X_train, Y_train)
 
-    # Make predictions for test set
-    Y_pred = model.predict(X_test)
-    Y_pred = pd.DataFrame(Y_pred, index=Y_test.index, columns=Y_test.columns)  # Predicted mu for test set
+def main():
+    setup_logging()
+    parser = argparse.ArgumentParser(description="Train RF and predict next-month returns.")
+    parser.add_argument("--data", default="data.csv", help="CSV file with historical price data")
+    parser.add_argument("--lags", type=int, default=3, help="Number of lagged return features")
+    parser.add_argument("--roll", nargs='+', type=int, default=[3, 6], help="Rolling window sizes (months)")
+    parser.add_argument("--test_ratio", type=float, default=0.2, help="Fraction of data to hold out for evaluation")
+    parser.add_argument("--model_path", default="ml_model.pkl", help="File path to save/load the trained model")
+    parser.add_argument("--n_estimators", type=int, default=100)
+    parser.add_argument("--max_depth", type=int, default=4)
+    parser.add_argument("--random_state", type=int, default=42)
+    args = parser.parse_args()
 
-    # Evaluate model
-    mae_scores = {}
-    r2_scores = {}
-    for stock in Y_test.columns:
-        mae = mean_absolute_error(Y_test[stock], Y_pred[stock])
-        r2 = r2_score(Y_test[stock], Y_pred[stock])
-        mae_scores[stock] = mae
-        r2_scores[stock] = r2
-        print(f"{stock} - MAE: {mae:.6f}, R²: {r2:.6f}")
+    prices = load_data(args.data)
+    returns = compute_log_returns(prices)
+    rf_params = {"n_estimators": args.n_estimators, "max_depth": args.max_depth, "random_state": args.random_state}
+    mu = predict_next_mu(
+        returns,
+        periods_per_year=12,
+        lag_nums=args.lags,
+        rolling_windows=args.roll,
+        test_ratio=args.test_ratio,
+        rf_params=rf_params,
+        model_path=args.model_path
+    )
+    print("Predicted next-month expected returns (annualized):")
+    print(mu)
 
-    # Average metrics
-    avg_mae = np.mean(list(mae_scores.values()))
-    avg_r2 = np.mean(list(r2_scores.values()))
-    print(f"\nAverage MAE: {avg_mae:.6f}")
-    print(f"Average R²: {avg_r2:.6f}")
-
-    # Display sample predicted mu for test set
-    print("\nSample Predicted Mu (Test Set):")
-    print(Y_pred.tail(5))
-
-    # Save test set predictions
-    Y_pred.to_csv('predicted_mu_test.csv')
-    print("\nTest set predicted mu saved to 'predicted_mu_test.csv'")
-
-    # Predict mu for the next month (beyond dataset)
-    latest_features = X.tail(1)  # Most recent features
-    next_mu = model.predict(latest_features)
-    next_date = X.index[-1] + pd.offsets.MonthEnd(1)  # Next month's date
-    next_mu_df = pd.DataFrame(next_mu, columns=Y.columns, index=[next_date])
-    print("\nPredicted Mu for Next Month:")
-    print(next_mu_df)
-
-    # Save next month's prediction
-    next_mu_df.to_csv('predicted_mu_next_month.csv')
-    print("\nNext month's predicted mu saved to 'predicted_mu_next_month.csv'")
-
-    # Feature importance (for first stock)
-    feature_importance = model.estimators_[0].feature_importances_
-    importance_df = pd.DataFrame({
-        'Feature': X_train.columns,
-        'Importance': feature_importance
-    }).sort_values(by='Importance', ascending=False)
-    print("\nFeature Importance (for first stock):")
-    print(importance_df.head(10))
 
 if __name__ == "__main__":
     main()
+
