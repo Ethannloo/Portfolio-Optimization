@@ -45,19 +45,25 @@ def plot_efficient_frontier(
 ):
     """
     Compute and plot the efficient frontier along with the tangency portfolio.
+
+    Args:
+        mu_series: Series of annualized expected returns.
+        Sigma_df:  DataFrame of annualized covariance matrix.
+        risk_free_rate: Annual risk-free rate (decimal).
+        num_points: Number of points on the efficient frontier.
     """
     mu_vec = mu_series.values
     Sigma_mat = Sigma_df.values
 
-    # Efficient frontier
+    # 1. Efficient frontier
     rets, vols = compute_efficient_frontier(mu_vec, Sigma_mat, num_points)
 
-    # Tangency portfolio (unit‐excess version, then normalize)
+    # 2. Tangency portfolio (unit‐excess version, then normalize)
     w_tang_raw = solve_tangency_portfolio(mu_vec, Sigma_mat, risk_free_rate)
     w_tang = normalize_weights(w_tang_raw)
     ret_t, vol_t, sharpe_t = portfolio_metrics(w_tang, mu_vec, Sigma_mat, risk_free_rate)
 
-    # Plot
+    # 3. Plot
     plt.figure(figsize=(8, 6))
     plt.plot(vols, rets, label="Efficient frontier")
     plt.scatter([vol_t], [ret_t], c='r', marker='*', s=100, label=f"Tangency (SR={sharpe_t:.2f})")
