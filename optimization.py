@@ -21,9 +21,8 @@ import cvxpy as cp
 from ml_model import predict_next_mu
 
 
-# ----------------------------------------------------------------------
 # I/O helpers
-# ----------------------------------------------------------------------
+
 def load_price_data(csv_file: str) -> pd.DataFrame:
     df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
     return df.sort_index()
@@ -33,9 +32,8 @@ def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
     return np.log(prices / prices.shift(1)).dropna()
 
 
-# ----------------------------------------------------------------------
+
 # Optimisation helpers
-# ----------------------------------------------------------------------
 def solve_tangency_portfolio(
     mu: np.ndarray,
     Sigma: np.ndarray,
@@ -44,7 +42,9 @@ def solve_tangency_portfolio(
     n = len(mu)
     w = cp.Variable(n)
     objective    = cp.Minimize(cp.quad_form(w, Sigma))
-    constraints  = [mu @ w - risk_free_rate == 1, w >= 0]
+    mu_excess = mu - risk_free_rate
+    constraints = [mu_excess @ w == 1, w >= 0]
+
     cp.Problem(objective, constraints).solve()
     if w.value is None:
         raise RuntimeError("QP solver failed to converge.")
@@ -70,9 +70,8 @@ def portfolio_metrics(
     return exp_ret, sigma, sharpe
 
 
-# ----------------------------------------------------------------------
 # Main script
-# ----------------------------------------------------------------------
+
 def main() -> None:
     CSV_FILE         = "adj_close_prices.csv"   # daily prices
     RISK_FREE_RATE   = 0.05                     # annual
@@ -95,9 +94,11 @@ def main() -> None:
     tickers  = mu_series.index
     mu_vec   = mu_series.values
 
-    # 4. historical Σ (annualised)
+    # 4. historical sigma (annualised)
     Sigma_df  = returns.cov() * PERIODS_PER_YEAR
     Sigma_mat = Sigma_df.values
+    Sigma_mat = Sigma_mat + 1e-8 * np.eye(Sigma_mat.shape[0])
+
 
     # 5-6. optimisation
     w_raw = solve_tangency_portfolio(mu_vec, Sigma_mat, RISK_FREE_RATE)
@@ -122,5 +123,5 @@ def main() -> None:
         print("\n[visual.plot_efficient_frontier] not found – skipping plot.")
 
 
-if __name__ == "__main__":   # pragma: no cover
+if __name__ == "__main__": 
     main()
